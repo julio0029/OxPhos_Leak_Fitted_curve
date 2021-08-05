@@ -17,8 +17,10 @@ current_path = os.path.dirname(os.path.abspath(__file__))
 #======== PARAMETERS =========
 
 CHAMBER_VOLUME = 2 #ml
-WINDOW = 20
+WINDOW = 20 #Moving averages
+MAX_kPA = 24 #kPa
 GRAPHING = False
+_saving = True
 FOLDER = f'{current_path}/CSV'
 
 #=============================
@@ -79,7 +81,6 @@ def get_JO2(PO2, mass=5):
 	_time=PO2.index*2
 
 	PO2=pd.DataFrame(PO2.values, index=_time, columns=['PO2'])
-	#PO2=PO2.loc[PO2['PO2']>0]
 
 	# Moving average
 	PO2=PO2.rolling(window=WINDOW).mean()
@@ -147,13 +148,16 @@ def main():
 					idx_col = df.columns.get_loc(col)
 					mass = df.iloc[0,idx_col+1]
 
+					# Select only to Anoxia part
 					select_df=df[df['Event Name']=='S']
+					select_df=select_df.loc[select_df[col]<=MAX_kPA].sort_index()
 
 					chambers.append({
 						'filename':file,
 						'temperature':temperature,
 						'chamber':chb[0],
 						'PO2':select_df.loc[:,col],
+						'PO2max':select_df.loc[:,col].max(),
 						'mass':mass
 						})
 
@@ -218,7 +222,6 @@ def main():
 	summary=pd.concat(summary)
 
 	# Save summary
-	_saving=True
 	if _saving is True:
 		summary.to_csv('summary.csv')
 
@@ -231,13 +234,12 @@ def main():
 	# select one file to graph
 	select=None
 	for c in chambers:
-		if c['filename']== 'Leak_OXPHOS_20_Trial3.csv':
+		if c['filename']== 'Leak_OXPHOS_30_Trial5.csv':
 			select=c
 			break
 	JO2=select['JO2']
 	predicted=select['predicted']
 
-	GRAPHING=False
 
 	if GRAPHING is True:
 		Graph().graph(
