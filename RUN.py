@@ -27,7 +27,7 @@ FILENAME = None#'Leak_OXPHOS_18_Trial10.csv' #Fro debugging
 #=============================
 
 
-import sys
+import sys, pickle
 import numpy as np
 import pandas as pd
 import pingouin as pg
@@ -326,6 +326,11 @@ def main():
 
 	chambers=extract_csvs()
 	chambers=process_all_chambers(chambers)
+
+	with open('chambers.pkl','wb') as f:
+		pickle.dump(chambers,f)
+	print("Saved chambers")
+	exit()
 	df=create_summary(chambers)
 
 	#df=pd.read_csv('summary.csv', index_col=0)
