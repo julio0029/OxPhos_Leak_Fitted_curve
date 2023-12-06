@@ -1,47 +1,40 @@
 #!/usr/bin/env python3
 #-*- coding: utf-8 -*-
 
-'''-------------------------------------------------------------------------------
-Copyright© 2021 Jules Devaux / Alice Harford. All Rights Reserved
-Open Source script under Apache License 2.0
-----------------------------------------------------------------------------------
-
-Fit respiration curve for the Leak/OxPhos study and extract relevant parameters.
 '''
-
+-------------------------------------------------------------------------------
+Copyright© 2021 Jules Devaux, Alice Harford, Tony Hickey. All Rights Reserved
+Open Source script under Apache License 2.0
+-------------------------------------------------------------------------------
+'''
 
 import os
 current_path = os.path.dirname(os.path.abspath(__file__))
 
 
-#======== PARAMETERS =========
-
+#========= PARAMETERS =========
+TEMPERATURES=[18, 20, 24, 25, 26, 27, 30]# 
 CHAMBER_VOLUME = 2 #ml
-WINDOW = 20 #Moving averages
+WINDOW = 10 #Moving averages
 MAX_kPA = 24 #kPa
 GRAPHING = False
-_saving = True # SAve summary file and stats
-FOLDER = f'{current_path}/CSV' # Folder containing all csvs
-FILENAME = None#'Leak_OXPHOS_18_Trial10.csv' #Fro debugging
+_saving = True # Save summary file and stats
+FOLDER = f'{current_path}/CSV/Leak_OXPHOS_mtMP_JO2_PO2_CSV_Original' # Folder containing all csvs
+SUBFOLDER_NAME='Leak_OXPHOS_mtMP_JO2_PO2_'
 
 #=============================
 
 
-import sys, pickle
+import sys, pickle, datetime
 import numpy as np
 import pandas as pd
 import pingouin as pg
 from scipy.optimize import curve_fit
 from matplotlib import pyplot as plt
 
-if GRAPHING is True:
-	try: from graph import Graph
-	except:
-		print(f"graph.py required in current directory {current_path}")
-
-
 
 def hill(S, Vmax, Km, n=1):
+	S=np.abs(S)
 	return (Vmax*S**n)/(Km+S**n)
 
 
@@ -70,6 +63,7 @@ def fit_hill_curve(x, y):
 	Vmax, pP50, _hill =popt[0], popt[1], popt[2]
 	y_fit = hill(x, Vmax, pP50, _hill)
 
+
 	# Goodness of fit:
 	# residual sum of squares
 	ss_res = np.sum((y - y_fit) ** 2)
@@ -81,155 +75,243 @@ def fit_hill_curve(x, y):
 	return Vmax, pP50, _hill, predicted, r2
 
 
-def get_JO2(PO2, mass=5, _resample=0.1):
+def get_JO2(PO2, mass=2, Kpa_to_pmol=True):
 	'''
-	Takes a csv file and pre-process to fit curve
-	Requires mass !
-	- smoothes PO2
-	- recalculate JO2
+	Recalculates JO2 from PO2.
+	Expects PO2 as series and in kPa.
+	Requires weight in mg (float)
 	'''
-
-	#index needs to be timed by 2 since recording time=2s
-	_time=PO2.index*2
-
-	PO2=pd.DataFrame(PO2.values, index=_time, columns=['PO2'])
 
 	# Moving average
-	PO2=PO2.rolling(window=int(WINDOW/2)).mean()
+	PO2=PO2.rolling(window=int(WINDOW/4)).mean()
 
 	# Calculate JO2
-	JO2=(((PO2.shift()-PO2)*CHAMBER_VOLUME)/mass)*100
-	JO2=pd.DataFrame(JO2.values, index=_time,columns=['JO2'])
+	# Expressed in kPa/s/mg
+	JO2=((((PO2.shift())-PO2)*CHAMBER_VOLUME)/(mass*2))*1000
 
-	# Create df with PO2 as index
-	JO2['PO2']=PO2
-	JO2=JO2.loc[JO2['PO2']>=0]
-	JO2=JO2.loc[JO2['JO2']>=0]
-	JO2=JO2.drop_duplicates(subset='PO2',keep='first')
+	# Exponential moving average to smooth it all.
+	JO2=JO2.ewm(span=WINDOW, adjust=False).mean()
 
-	JO2 = JO2.set_index('PO2'
-			).sort_index(
-			).rename(columns={JO2.columns[0]:'JO2'}
-			).replace([np.inf, -np.inf, np.nan, float('nan')], 0, inplace=False
-			).rolling(window=WINDOW).mean(
-			).dropna(
-			).astype('float64')
+	# Convert to pmol/s/mg
+	if Kpa_to_pmol is True:
+		JO2=JO2*(224.47/20.37)
 
 	return JO2
+
+
 
 
 def extract_csvs():
 	# All chambers saved as dict
 	chambers = []
-	for temperature in [18, 20, 24, 25, 26, 27, 30]:
-		_path = f"{FOLDER}/{temperature}/"
-		for file in os.listdir(_path):
 
-			if '.csv' in file:
-				print(f'Exctracting {file}...')
-				df=pd.read_csv(f"{_path}{file}", low_memory=False)
-				
-				
-				df['Event Name']=df['Event Name'].fillna(method='ffill')
+	for temperature in TEMPERATURES:
 
-				for chb in ['A:', 'B:']:
-					col=[c for c in df.columns if chb in c][0]
-					idx_col = df.columns.get_loc(col)
-					mass = df.iloc[0,idx_col+1]
+		# List all csv in temperature folders
+		_path = f"{FOLDER}/{SUBFOLDER_NAME}{temperature}/"
+		csvs=[file for file in os.listdir(_path) if '.csv' in file]
 
-					# Select only to Anoxia part
-					# Some files had the whole experiments
-					if 'S' in df['Event Name'].values:
-						select_df=df[df['Event Name']=='S']
-						#print(f"{file} with S")
-					else:
-						select_df=df
-						#print(f"{file} without S")
-					
-					select_df=select_df.loc[select_df[col]<=MAX_kPA].sort_index()
-					PO2=select_df.loc[:,col]
+		for csv in csvs:
+			print(f'Exctracting {csv}...')
+			df=pd.read_csv(f"{_path}{csv}", low_memory=False, encoding= 'unicode_escape')
+			
+			# Split each chamber:
+			for chb in ['A', 'B']:
+				try:
+					# Retrieve weight
+					WGH_col=[c for c in df.columns if f"Weight {chb}" in c][0]
+					weight=float(df.loc[:,WGH_col].iloc[0])
 
-					# Exctract JO2
-					kPa_to_nM=(224.47/20.37)
-					JO2=get_JO2(PO2, mass)*kPa_to_nM*30
+					# Retrieve and select columns for that specific chamber
+					PO2_col=[c for c in df.columns if f"{chb}: O2 pres" in c][0]
+					JO2_col=[c for c in df.columns if f"{chb}: O2 flux" in c][0]
+					DYm_col=[c for c in df.columns if f"{chb}: Amp [" in c][0]
+
+					# Create DataFrame for that chamber
+					cdf=df.loc[:,[PO2_col,JO2_col,DYm_col]].dropna()
+					cdf=cdf.rename(columns={PO2_col:'PO2',
+											JO2_col:'JO2',
+											DYm_col:'DYm'})
+
+
+					# Recalculate JO2 from PO2
+					cdf['JO2_calc']=get_JO2(cdf['PO2'], weight)
+
+					cdf['PO2']=cdf['PO2']-cdf['PO2'].min()
+					cdf['JO2']=cdf['JO2']-cdf['JO2'].min()
+					cdf['JO2_calc']=cdf['JO2_calc']-cdf['JO2_calc'].min()
+
 
 					# Define OXPHOS - LEAK
 					if chb[0] == 'A':
 						_state = 'OXPHOS'
 					else: _state = 'LEAK'
 
-
-					# Store chamber parameters into chambers list
 					chambers.append({
-						'filename':file,
+						'filename':csv,
 						'temperature':temperature,
-						'chamber':chb[0],
+						'chamber':chb,
 						'state':_state,
-						'PO2':PO2,
-						'PO2max':PO2.max(),
-						'JO2':JO2,
-						'expJO2max':JO2.max(),
-						'mass':mass
+						'df':cdf,
+						'mass':weight
 						})
 
+
+				except Exception as e:print(f"ERROR: {csv}: chamber {chb}: {e}")
+			
 	return chambers
 
 
-def process_all_chambers(chambers):
-	_dicts=[] #temprary list to avoid overwriting chambers list
-	errors=[]
+def fundamentals(chambers, _saving=True):
+
+	_dicts=[] # Main list to create the final df
 	for chamber in chambers:
-		print(f"Processing {chamber['filename']}")
-		#try:
-		if True:
+
+		_dicts.append({
+			'filename':f"{chamber['filename']}_{chamber['state']}",
+			'PO2_max':chamber['df']['PO2'].max(),
+			'PO2_min':chamber['df']['PO2'].min(),
+			'JO2_max':chamber['df']['JO2'].max(),
+			'JO2_min':chamber['df']['JO2'].min(),
+			'dt':len(chamber['df'])
+		})
+
+	df=pd.DataFrame(_dicts)
+	summary=df.agg(['mean','sem'])
+	if _saving:
+		df.to_csv('fundamentals.csv')
+		print('saved fundamentals')
+
+	return df
+
+
+def process_all_chambers(chambers):
+	'''
+	index as time, columns = JO2, PO2, DYm
+	'''
+
+		
+	_dicts=[] #temprary list to avoid overwriting chambers list
+	for chamber in chambers:
+		try:
+
+			print(f"Processing {chamber['filename']}")
+
+			
+
+			# GRAPH
+			#plt.scatter(X, predicted, label='pred')
+			# plt.scatter(chamber['df'].index, chamber['df']['DYm'].values, label='expe')
+			# plt.title(chamber['filename'])
+			# plt.show()
+
+			# ============= JO2 PARAMETERS AND FITTED HILL CURVE ============
+			# Observed P50 from raw JO2
+			try:
+				JO2_max=chamber['df']['JO2'].max()
+				JO2_50=JO2_max/2
+				_portion=chamber['df'].loc[chamber['df']['JO2']<(JO2_50)]
+				oP50=_portion['PO2'].iloc[0]
+			except Exception as e:
+				print(f"ERROR: observed_P50: {e}")
+				oP50=float('nan')
+
+			# need to have df with PO2 index and JO2 column
+			tdf=chamber['df'].loc[:,['PO2','JO2']]
+			tdf=tdf.drop_duplicates(subset='PO2', keep='first').set_index('PO2').sort_index()
 
 			# Fit curve to experimental PO2 
-			fJO2max, fP50, _hill, fitted, r2 = fit_hill_curve(chamber['JO2'].index.values, chamber['JO2']['JO2'].values)
+			fJO2max, fP50, _hill, fitted, r2 = fit_hill_curve(tdf.index.values, tdf['JO2'].values)
 
 			# Extend curve to 0 -> 100% PO2
 			# Standardise PO2 for comaprison between samples
 			X=np.arange(0, MAX_kPA, 0.01)
 			predicted=hill(X, fJO2max, fP50, _hill)
-
-			# plt.scatter(X, predicted, label='pred')
-			# plt.scatter(chamber['JO2'].index,chamber['JO2']['JO2'].values, label='expe')
-			# plt.show()
-
-			# JO2max at 100% saturation 
-			kPa21_JO2max=predicted.max()
-
-
-			# Extract P50 from fitted curve ()
-			JO2_50=kPa21_JO2max/2
-			cP50=_hill*(((JO2_50*fP50)/(kPa21_JO2max-JO2_50))**(_hill-1))
-
+			predicted=pd.DataFrame(predicted, index=X, columns=['JO2'])
 
 			# Calculate area under the curve from Standardised
-			auc=np.trapz(predicted, X, 0.1)
+			auc=np.trapz(predicted['JO2'], predicted.index, 0.1)
+
+			# JO2max at 100% saturation 
+			kPa21_JO2max=predicted['JO2'].max()
+
+			# Extract P50 from fitted JO2
+			try:
+				JO2_50=kPa21_JO2max/2
+				_portion=predicted.loc[predicted['JO2']<JO2_50]
+				cP50=_portion.index.values[-1]
+			except Exception as e:
+				print(f"ERROR: calculated_P50: {e}")
+				cP50=float('nan')
+
+
+
+			# ============= MEMBRANE POTENTIAL ==========
+			dym=chamber['df'].loc[:,['PO2','DYm']]
+			dym=dym.drop_duplicates(subset='PO2', keep='first'
+					).set_index('PO2').sort_index()
+			dym=dym.loc[(dym.index<21)]
+			dym=(2-dym)/chamber['mass']
+			dym=dym.rolling(window=WINDOW).mean().dropna()
+
+
+			# Fit curve to experimental PO2 
+			fDYmmax, fP50_DYm, DYm_hill, DYm_fitted, DYm_r2 = fit_hill_curve(dym.index.values, dym['DYm'].values)
+
+			# Extend curve to 0 -> 100% PO2
+			# Standardise PO2 for comaprison between samples
+			DYm_predicted=hill(X, fDYmmax, fP50_DYm, DYm_hill)
+			DYm_predicted=pd.DataFrame(DYm_predicted, index=X, columns=['DYm'])
+
+			# Calculate area under the curve from Standardised
+			DYm_auc=np.trapz(DYm_predicted['DYm'], DYm_predicted.index, 0.1)
+
+			# DYmmax at 100% saturation 
+			kPa21_DYmmax=DYm_predicted['DYm'].max()
+
+			# Extract P50 from fitted DYm
+			try:
+				DYm_50=kPa21_DYmmax/2
+				_portion=DYm_predicted.loc[DYm_predicted['DYm']<DYm_50]
+				cP50_DYm=_portion.index.values[-1]
+			except Exception as e:
+				print(f"ERROR: DYm_calculated_P50: {e}")
+				cP50_DYm=float('nan')
+
 
 
 			# Update parameters for chamber
 			chamber.update(
-				{'JO2': chamber['JO2'],
-				'fJO2max': fJO2max,
-				'fP50':fP50,
-				'hill':_hill,
-				'kPa21_JO2max':kPa21_JO2max,
-				'cP50':cP50,
-				'goodness of fit':r2,
-				'area under curve':auc,
-				'predicted':predicted
+				{'JO2_observed_P50':oP50,
+				'JO2max_fitted': fJO2max,
+				'JO2_fitted_P50':fP50,
+				'JO2_fitted_hill':_hill,
+				'JO2max_at_21kPa':kPa21_JO2max,
+				'JO2_calc_P50':cP50,
+				'JO2 goodness of fit':r2,
+				'JO2 area under curve':auc,
+				'JO2 predicted':predicted,
+				'DYmmax_fitted': fDYmmax,
+				'DYm_fitted_P50':fP50_DYm,
+				'DYm_fitted_hill':DYm_hill,
+				'DYmmax_at_21kPa':kPa21_DYmmax,
+				'DYm_calc_P50':cP50_DYm,
+				'DYm goodness of fit':DYm_r2,
+				'DYm area under curve':DYm_auc,
+				'DYm predicted':DYm_predicted,
 				})
 
 			_dicts.append(chamber)
 
-		# except Exception as e:
-		# 	print(f"{chamber['filename']}: {e}")
-		# 	errors.append(chamber['filename'])
-	for e in errors:print(e)
-	
-	return _dicts
+			# GRAPH
+			plt.scatter(DYm_predicted.index, DYm_predicted['DYm'], label='pred', c='blue')
+			plt.scatter(dym.index, dym.values, label='expe', c='red')
+			plt.title(f"{chamber['filename']} - {chamber['state']}")
+			plt.show()
 
+		except Exception as e:print(e)
+
+	return _dicts
 
 
 def create_summary(chambers):
@@ -237,24 +319,26 @@ def create_summary(chambers):
 	# Check outliers
 	outliers=[]
 	for chamber in chambers:
-		if float(chamber['goodness of fit'])<=0.5:
-			outliers.append({
-				'filename':chamber['filename'],
-				'chamber': chamber['chamber']
-				})
+		if (float(chamber['JO2 goodness of fit'])<=0.5) or (float(chamber['DYm goodness of fit'])<=0.5):
+			outliers.append(chamber['filename'])
+			# outliers.append({
+			# 	'filename':chamber['filename'],
+			# 	'chamber': chamber['chamber']
+			# 	})
 
 		print("============= OUTLIERS ==============")
 		for o in outliers:
-			print(f"{o['filename']} - chamber {o['chamber']}")
+			print(o)
+			#print(f"{o['filename']} - chamber {o['chamber']}")
 		print("\n\n")
 
 		# Create summary table
 		summary=[]
 		for i in range(len(chambers)):
-			row={k:v for k,v in chambers[i].items() if k not in ['PO2','predicted','JO2']}
-
-			row=pd.DataFrame(row, index=[i])
-			summary.append(row)
+			if chambers[i]['filename'] not in outliers:
+				row={k:v for k,v in chambers[i].items() if k not in ['df','PO2','JO2 predicted','JO2','JO2_calc','DYm', 'DYm predicted']}
+				row=pd.DataFrame(row, index=[i])
+				summary.append(row)
 		summary=pd.concat(summary)
 
 		# Save summary
@@ -267,7 +351,8 @@ def create_summary(chambers):
 def do_stats(df):
 	
 	# Create Excel template
-	fileName=f'Summary.xlsx'
+	_now=datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+	fileName=f'Summary_{_now}.xlsx'
 	writer=pd.ExcelWriter(fileName, engine='xlsxwriter')
 
 	# First, add data to first tab
@@ -275,9 +360,7 @@ def do_stats(df):
 
 
 	between=['temperature','state']
-	parameters=['PO2max',
-				'fJO2max','fP50','hill','kPa21_JO2max',
-				'cP50','goodness of fit','area under curve']
+	parameters=[c for c in df.columns if df[c].dtypes != 'object' and c not in between]
 
 
 	#===== Do Averages and SEM
@@ -320,35 +403,16 @@ def do_stats(df):
 
 
 
-
-
 def main():
-
 	chambers=extract_csvs()
+	_fundamentals=fundamentals(chambers)
 	chambers=process_all_chambers(chambers)
+	with open('chambers.pkl','wb') as f:
+		pickle.dump(chambers,f)
 	df=create_summary(chambers)
-
-	#df=pd.read_csv('summary.csv', index_col=0)
+	df=pd.read_csv('summary.csv', header=0).drop(columns='Unnamed: 0')
 	do_stats(df)
 
 
-
-
-
-	# select one file to graph
-	if GRAPHING is True:
-		if FILENAME is not None:
-			chambers=[c for c in chambers if c['filename']==FILENAME]
-
-		for c in chambers:	
-			JO2=c['JO2']
-			predicted=c['predicted']
-			Graph().graph(
-				[[JO2.index,
-				{'y': JO2['JO2'], 'type': 'line', 'color': 'red'},
-				{'y': predicted, 'type': 'line', 'color': 'blue'}]],
-				title=f"{c['temperature']}-{c['chamber']}")
-
-if __name__ == '__main__':
+if __name__=='__main__':
 	main()
-
